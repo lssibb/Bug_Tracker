@@ -10,6 +10,8 @@ try { storage = localStorage; } catch { storage = null; }
 let bugs = loadBugs(storage);
 let query = '';
 let status = '';
+let editingBugId: number | null = null;
+let savedBugId: number | null = null;
 
 const statusLabels: Record<Status, string> = {
   Open: 'Открыт',
@@ -45,6 +47,17 @@ function options(values: readonly string[]): string {
   return values.map(value => `<option>${e(value)}</option>`).join('');
 }
 
+function editableOptions(values: readonly string[], selected: string, labels?: Record<string, string>): string {
+  return values.map(value => `<option value="${e(value)}" ${value === selected ? 'selected' : ''}>${e(labels?.[value] ?? value)}</option>`).join('');
+}
+
+function validDeadline(value: string): boolean {
+  if (!value) return true;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T12:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
 function heading(title: string, action = ''): string {
   return `<div class="page-heading"><h1>${title}</h1>${action}</div>`;
 }
@@ -59,14 +72,14 @@ function table(found: Bug[]): string {
     <thead role="rowgroup"><tr role="row">
       <th scope="col" role="columnheader">№</th><th scope="col" role="columnheader">Название</th>
       <th scope="col" role="columnheader">Статус</th><th scope="col" role="columnheader">Приоритет</th>
-      <th scope="col" role="columnheader">Исполнитель</th><th scope="col" role="columnheader">Срок</th>
+      <th scope="col" role="columnheader">Разработчик</th><th scope="col" role="columnheader">Срок</th>
     </tr></thead>
     <tbody role="rowgroup">${found.map(b => `<tr role="row">
       <td class="number" role="cell">#${b.id}</td>
       <th class="bug-title" scope="row" role="rowheader"><a href="#/bug/${b.id}">${e(b.title)}</a></th>
       <td class="bug-status" role="cell">${badge(b.status)}</td>
       <td class="bug-priority" role="cell"><span class="mobile-label" aria-hidden="true">Приоритет</span>${e(b.priority)}</td>
-      <td class="bug-assignee" role="cell"><span class="mobile-label" aria-hidden="true">Исполнитель</span>${b.assignee ? e(b.assignee) : '<span class="muted">Не назначен</span>'}</td>
+      <td class="bug-assignee" role="cell"><span class="mobile-label" aria-hidden="true">Разработчик</span>${b.assignee ? e(b.assignee) : '<span class="muted">Не назначен</span>'}</td>
       <td class="date" role="cell"><span class="mobile-label" aria-hidden="true">Срок</span>${date(b.deadline)}</td>
     </tr>`).join('')}</tbody>
   </table>`;
@@ -98,16 +111,39 @@ function detail(id: number): string {
   const b = bugs.find(item => item.id === id);
   if (!b) return bugLink + heading('Баг не найден');
 
+  const editing = editingBugId === b.id;
+  const developers = [...new Set(bugs.map(item => item.assignee).filter(Boolean))];
+  const meta = editing
+    ? `<form id="edit-bug-form" class="bug-meta-editor" data-bug-id="${b.id}">
+        <label for="edit-status">Статус</label>
+        <select id="edit-status" name="status" required>${editableOptions(statuses, b.status, statusLabels)}</select>
+        <label for="edit-priority">Приоритет</label>
+        <select id="edit-priority" name="priority" required>${editableOptions(priorities, b.priority)}</select>
+        <label for="edit-assignee">Разработчик</label>
+        <input id="edit-assignee" name="assignee" type="text" list="developer-options" maxlength="100" value="${e(b.assignee)}" placeholder="Не назначен">
+        <datalist id="developer-options">${developers.map(name => `<option value="${e(name)}"></option>`).join('')}</datalist>
+        <label for="edit-deadline">Дедлайн</label>
+        <input id="edit-deadline" name="deadline" type="date" value="${e(b.deadline)}">
+        <p id="edit-error" class="edit-error" role="alert"></p>
+        <div class="edit-form-actions">
+          <button class="button" type="button" data-action="cancel-edit">Отмена</button>
+          <button class="button primary" type="submit">Сохранить</button>
+        </div>
+      </form>`
+    : `<dl class="bug-meta">
+        <div><dt>Статус</dt><dd>${badge(b.status)}</dd></div>
+        <div><dt>Приоритет</dt><dd>${e(b.priority)}</dd></div>
+        <div><dt>Разработчик</dt><dd>${b.assignee ? e(b.assignee) : '<span class="muted">Не назначен</span>'}</dd></div>
+        <div><dt>Срок</dt><dd>${date(b.deadline)}</dd></div>
+      </dl>`;
+
   return `${bugLink}${heading(`<span class="number">#${b.id}</span> ${e(b.title)}`)}
     <div class="detail-layout">
       <article class="bug-description">${section('Что происходит', b.description)}${section('Шаги воспроизведения', b.steps)}${section('Ожидаемый результат', b.expected)}</article>
-      <dl class="bug-meta">
-        <div><dt>Статус</dt><dd>${badge(b.status)}</dd></div>
-        <div><dt>Приоритет</dt><dd>${e(b.priority)}</dd></div>
-        <div><dt>Исполнитель</dt><dd>${b.assignee ? e(b.assignee) : '<span class="muted">Не назначен</span>'}</dd></div>
-        <div><dt>Срок</dt><dd>${date(b.deadline)}</dd></div>
-      </dl>
-    </div>`;
+      ${meta}
+      ${editing ? '' : '<div class="detail-actions"><button class="button edit-trigger" type="button" data-action="edit-bug">ИЗМЕНИТЬ</button></div>'}
+    </div>
+    ${savedBugId === b.id && !editing ? '<p class="save-notice" role="status">Изменения сохранены.</p>' : ''}`;
 }
 
 function section(title: string, text: string): string {
@@ -155,12 +191,71 @@ document.addEventListener('change', event => {
   }
 });
 document.addEventListener('click', event => {
-  if (event.target instanceof Element && event.target.closest('.skip-link')) {
-    event.preventDefault(); document.querySelector<HTMLElement>('#main')?.focus();
+  if (!(event.target instanceof Element)) return;
+  if (event.target.closest('.skip-link')) {
+    event.preventDefault();
+    document.querySelector<HTMLElement>('#main')?.focus();
+    return;
+  }
+
+  const action = event.target.closest<HTMLButtonElement>('button[data-action]')?.dataset.action;
+  if (action === 'edit-bug') {
+    const id = Number(location.hash.match(/^#\/bug\/(\d+)$/)?.[1]);
+    if (!bugs.some(b => b.id === id)) return;
+    editingBugId = id;
+    savedBugId = null;
+    render();
+    document.querySelector<HTMLSelectElement>('#edit-status')?.focus();
+  } else if (action === 'cancel-edit') {
+    editingBugId = null;
+    render();
+    document.querySelector<HTMLButtonElement>('[data-action="edit-bug"]')?.focus();
   }
 });
 document.addEventListener('submit', event => {
-  if (!(event.target instanceof HTMLFormElement) || event.target.id !== 'bug-form') return;
+  if (!(event.target instanceof HTMLFormElement)) return;
+  if (event.target.id === 'edit-bug-form') {
+    event.preventDefault();
+    const bugId = Number(event.target.dataset.bugId);
+    const bug = bugs.find(item => item.id === bugId);
+    if (!bug || editingBugId !== bugId) return;
+
+    const values = new FormData(event.target);
+    const field = (name: string): string => String(values.get(name) ?? '').trim();
+    const newStatus = field('status');
+    const newPriority = field('priority');
+    const assignee = field('assignee');
+    const deadline = field('deadline');
+    const error = document.querySelector<HTMLParagraphElement>('#edit-error');
+
+    if (!statuses.some(value => value === newStatus) || !priorities.some(value => value === newPriority)
+      || assignee.length > 100 || !validDeadline(deadline)) {
+      if (error) error.textContent = 'Проверьте статус, приоритет, разработчика и дату дедлайна.';
+      return;
+    }
+
+    const updated: Bug = {
+      ...bug,
+      status: newStatus as Status,
+      priority: newPriority as Priority,
+      assignee,
+      deadline,
+    };
+    const nextBugs = bugs.map(item => item.id === bugId ? updated : item);
+    if (!saveBugs(storage, nextBugs)) {
+      if (error) error.textContent = 'Не удалось сохранить изменения. Проверьте разрешение на локальное хранение.';
+      return;
+    }
+
+    bugs = nextBugs;
+    editingBugId = null;
+    savedBugId = bugId;
+    render();
+    document.querySelector<HTMLButtonElement>('[data-action="edit-bug"]')?.focus();
+    return;
+  }
+
+  if (event.target.id !== 'bug-form') return;
   event.preventDefault();
   const values = new FormData(event.target);
   const field = (name: string): string => String(values.get(name) || '').trim();
@@ -179,6 +274,8 @@ document.addEventListener('submit', event => {
   bugs.push(added); query = ''; status = ''; location.hash = `/bug/${added.id}`;
 });
 window.addEventListener('hashchange', () => {
+  editingBugId = null;
+  savedBugId = null;
   render();
   window.scrollTo(0, 0);
   document.querySelector<HTMLElement>('#main')?.focus({ preventScroll: true });
